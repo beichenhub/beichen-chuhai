@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang=zh-CN>
+<head>
+  <meta charset=utf-8>
+  <meta name=viewport content="width=device-width, initial-scale=1">
+  <title>北辰出海</title>
+  <link rel=stylesheet href=styles.css>
+</head>
+<body>
+  <div class=app-shell>
+    <aside class=sidebar>
+      <div class=brand>
+        <div class=brand-logo>北</div>
+        <div class=brand-name>北辰出海</div>
+      </div>
+
+      <div class=nav-title>导航</div>
+      <button class="nav-item active" data-category=全部商品>
+        <span>⌂</span><span>全部商品</span>
+      </button>
+
+      <div class=nav-group-title>商品分类</div>
+      <div id=categoryNav></div>
+
+      <div class=nav-title more>更多</div>
+      <button class=nav-item id=tgBtn><span>✈</span><span>TG频道</span></button>
+      <button class=nav-item id=siteInfoBtn><span>◎</span><span>站点资讯</span></button>
+
+      <button class=logout><span>↪</span><span>退出登录</span></button>
+    </aside>
+
+    <main class=main>
+      <header class=topbar>
+        <button class=icon-btn id=menuBtn>☰</button>
+        <div class=balance>$<span id=balanceValue>0.00</span></div>
+        <button class=top-link id=rechargeBtn>▣ 账户充值</button>
+        <button class=top-link id=contactBtn>✈ 联系客服</button>
+        <button class=top-link id=ordersBtn>▣ 订单记录</button>
+        <button class=top-link id=ledgerBtn>◉ 余额明细</button>
+
+        <div class=top-spacer></div>
+        <div class=search-wrap>
+          <input id=searchInput placeholder=输入关键词回车搜索>
+          <span>⌕</span>
+        </div>
+        <button class=theme-btn id=themeBtn>☼</button>
+        <button class=user-btn id=userBtn>
+          <span class=avatar>C</span>
+          <span>beichen0001</span>
+          <span>⌄</span>
+        </button>
+      </header>
+
+      <section class=hero-grid>
+        <div class=hero-card>
+          <div class=status-pill><span></span> 海外数字服务与咨询</div>
+          <h1>北辰出海</h1>
+          <p>海外平台服务咨询<br>在线下单与售后支持</p>
+          <h2>清晰报价，快速下单，进度随时可查。<br>定制服务请先联系客服确认。</h2>
+          <button class=primary-btn id=heroContactBtn>咨询客服 👆</button>
+        </div>
+
+        <div class=news-card>
+          <div class=news-head>
+            <strong>最新动态 LATEST NEWS</strong>
+            <span>↗</span>
+          </div>
+          <div class=news-item>▧ 欢迎来到北辰出海</div>
+          <div class=news-item>▧ USDT TRC20 支付功能已开放</div>
+        </div>
+      </section>
+
+      <div class=notice>
+        <span>服务说明：本网站仅提供合法的数字服务、咨询及技术支持。禁止用于违法、欺诈、冒用身份或规避平台规则的行为。</span>
+        <button id=closeNotice>×</button>
+      </div>
+
+      <section class=content>
+        <div class=chips id=categoryChips></div>
+        <div id=productSections></div>
+      </section>
+    </main>
+  </div>
+
+  <div class=modal-backdrop id=modalBackdrop>
+    <div class=modal id=modal>
+      <button class=modal-close id=modalClose>×</button>
+      <div id=modalContent></div>
+    </div>
+  </div>
+
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    window.SUPABASE_URL = 'https://flyksqchtapkholfbgzj.supabase.co';
+    window.SUPABASE_KEY = 'sb_publishable_r5sXWYRYSh1-U6VRATcHDQ_7c8yvpw0';
+  </script>
+  <script src=app.js></script>
+</body>
+</html>
