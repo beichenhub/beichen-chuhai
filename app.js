@@ -74,255 +74,197 @@ const products = [
   ['Ourtime','OurTime 男性 66至72岁资料优化','优化个人简介、兴趣、家庭观念与消息开场',19.3,169]
 ].map((p,i)=>({id:i+1,category:p[0],name:p[1],desc:p[2],price:p[3],stock:p[4]}))
 
+
+const APP_CONFIG = {
+  walletAddress: 'TBrXpCm2bmo4SXrTgPVSWNAmE3KxmQTr3n',
+  qrImage: 'trc20-qr.png',
+  supportTelegram: '@your_support',
+  supportEmail: 'support@example.com',
+  listenerFunction: 'tron-listener'
+}
+
 const state = {
   category: '全部商品',
   query: '',
-  balance: Number(localStorage.getItem('bc_balance') || 0),
-  orders: JSON.parse(localStorage.getItem('bc_orders') || '[]')
+  balance: 0,
+  orders: [],
+  ledger: [],
+  user: null,
+  remoteOrdersAvailable: true,
+  remoteBalanceAvailable: true,
+  remoteLedgerAvailable: true
 }
 
-const $ = s => document.querySelector(s)
-const $$ = s => document.querySelectorAll(s)
-const categoryNav = $('#categoryNav')
-const categoryChips = $('#categoryChips')
-const productSections = $('#productSections')
+const $ = selector => document.querySelector(selector)
+const $$ = selector => document.querySelectorAll(selector)
 
-function esc(v=''){
-  return String(v).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]))
+let supabaseClient = null
+let activePaymentTimer = null
+
+function esc(value = ''){
+  return String(value).replace(/[&<>'"]/g, char => ({
+    '&':'&amp;',
+    '<':'&lt;',
+    '>':'&gt;',
+    "'":'&#39;',
+    '"':'&quot;'
+  }[char]))
 }
 
-function navButton(c){
-  return `<button class=nav-item data-category="${esc(c.name)}">
-    <span class=dot-logo style="background:${c.color}">${esc(c.icon)}</span>
-    <span>${esc(c.name)}</span>
+function formatMoney(value){
+  const amount = Number(value)
+  return Number.isFinite(amount) ? amount.toFixed(2) : '0.00'
+}
+
+function currentUserStorageKey(){
+  return state.user ? `bc_orders_${state.user.id}` : 'bc_orders_guest'
+}
+
+function loadLocalOrders(){
+  try{
+    const raw = localStorage.getItem(currentUserStorageKey())
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  }catch(error){
+    console.warn('读取本地订单失败：', error.message)
+    return []
+  }
+}
+
+function saveLocalOrders(){
+  try{
+    localStorage.setItem(currentUserStorageKey(), JSON.stringify(state.orders))
+  }catch(error){
+    console.warn('保存本地订单失败：', error.message)
+  }
+}
+
+function navButton(category){
+  return `<button class=nav-item data-category="${esc(category.name)}">
+    <span class=dot-logo style="background:${category.color}">${esc(category.icon)}</span>
+    <span>${esc(category.name)}</span>
   </button>`
 }
 
 function renderNav(){
+  const categoryNav = $('#categoryNav')
+  const categoryChips = $('#categoryChips')
+  if(!categoryNav || !categoryChips) return
+
   categoryNav.innerHTML = categories.map(navButton).join('')
   categoryChips.innerHTML = [
-    `<button class="chip ${state.category==='全部商品'?'active':''}" data-category=全部商品>▦ 所有商品</button>`,
-    ...categories.map(c=>`<button class="chip ${state.category===c.name?'active':''}" data-category="${esc(c.name)}">${esc(c.icon)} ${esc(c.name)}</button>`)
+    `<button class="chip ${state.category === '全部商品' ? 'active' : ''}" data-category=全部商品>▦ 所有商品</button>`,
+    ...categories.map(category => `
+      <button class="chip ${state.category === category.name ? 'active' : ''}" data-category="${esc(category.name)}">
+        ${esc(category.icon)} ${esc(category.name)}
+      </button>`)
   ].join('')
 
-  $$('[data-category]').forEach(btn=>{
-    btn.onclick=()=>{
-      state.category=btn.dataset.category
-      renderAll()
-      if(innerWidth<820) $('.sidebar').classList.remove('open')
+  $$('[data-category]').forEach(button => {
+    button.onclick = () => {
+      state.category = button.dataset.category
+      renderNav()
+      renderProducts()
+      const sidebar = $('.sidebar')
+      if(innerWidth < 820 && sidebar) sidebar.classList.remove('open')
     }
   })
 }
 
 function renderProducts(){
-  let list=products.filter(p=>{
-    const byCat=state.category==='全部商品'||p.category===state.category
-    const q=state.query.toLowerCase()
-    const byQ=!q||p.name.toLowerCase().includes(q)||p.desc.toLowerCase().includes(q)||p.category.toLowerCase().includes(q)
-    return byCat&&byQ
+  const productSections = $('#productSections')
+  if(!productSections) return
+
+  const query = state.query.toLowerCase()
+  const filtered = products.filter(product => {
+    const categoryMatches = state.category === '全部商品' || product.category === state.category
+    const queryMatches = !query ||
+      product.name.toLowerCase().includes(query) ||
+      product.desc.toLowerCase().includes(query) ||
+      product.category.toLowerCase().includes(query)
+    return categoryMatches && queryMatches
   })
 
-  const grouped={}
-  list.forEach(p=>(grouped[p.category]??=[]).push(p))
-  productSections.innerHTML=Object.keys(grouped).map(cat=>{
-    const c=categories.find(x=>x.name===cat)
+  const grouped = {}
+  filtered.forEach(product => {
+    if(!grouped[product.category]) grouped[product.category] = []
+    grouped[product.category].push(product)
+  })
+
+  productSections.innerHTML = Object.keys(grouped).map(categoryName => {
+    const category = categories.find(item => item.name === categoryName)
     return `<section>
-      <div class=section-title><span>◉</span>${esc(cat)}</div>
+      <div class=section-title><span>◉</span>${esc(categoryName)}</div>
       <div class=product-list>
-        ${grouped[cat].map(p=>`
+        ${grouped[categoryName].map(product => `
           <div class=product-card>
-            <div class=product-icon style="background:${c?.color||'#222'}">${esc(c?.icon||'北')}</div>
-            <div><div class=product-name>${esc(p.name)}</div><div class=product-desc>${esc(p.desc)}</div></div>
-            <div class=product-price>$${p.price.toFixed(2)}</div>
-            <div class=stock>库存 ${p.stock}</div>
-            <button class=buy-btn data-buy=${p.id}>${p.category.includes('定制服务')?'联系客服':(p.stock===0?'查看库存':'▢ 购买')}</button>
+            <div class=product-icon style="background:${category?.color || '#222'}">${esc(category?.icon || '北')}</div>
+            <div>
+              <div class=product-name>${esc(product.name)}</div>
+              <div class=product-desc>${esc(product.desc)}</div>
+            </div>
+            <div class=product-price>$${formatMoney(product.price)}</div>
+            <div class=stock>库存 ${product.stock}</div>
+            <button class=buy-btn data-buy=${product.id}>
+              ${product.category.includes('定制服务') ? '联系客服' : (product.stock === 0 ? '查看库存' : '▢ 购买')}
+            </button>
           </div>`).join('')}
       </div>
     </section>`
   }).join('') || `<div class=pay-box>没有找到相关商品</div>`
 
-  $$('[data-buy]').forEach(btn=>btn.onclick=()=>{
-    const p=products.find(x=>x.id===Number(btn.dataset.buy))
-    if(p.category.includes('定制服务')) return openContact()
-    if(p.stock===0) return openModal('<h3>库存提醒</h3><div class=pay-box>当前服务名额已满，请稍后查看或联系客服预约。</div>')
-    openBuy(p.id)
+  $$('[data-buy]').forEach(button => {
+    button.onclick = async () => {
+      const product = products.find(item => item.id === Number(button.dataset.buy))
+      if(!product) return
+
+      if(product.category.includes('定制服务')){
+        openContact()
+        return
+      }
+
+      if(product.stock === 0){
+        openModal('<h3>库存提醒</h3><div class=pay-box>当前服务名额已满，请稍后查看或联系客服预约。</div>')
+        return
+      }
+
+      await openBuy(product.id)
+    }
   })
 }
 
+function renderBalance(){
+  const balanceValue = $('#balanceValue')
+  if(balanceValue) balanceValue.textContent = formatMoney(state.balance)
+}
+
 function renderAll(){
-  $('#balanceValue').textContent=state.balance.toFixed(2)
+  renderBalance()
   renderNav()
   renderProducts()
 }
 
 function openModal(html){
-  $('#modalContent').innerHTML=html
-  $('#modalBackdrop').classList.add('show')
+  const content = $('#modalContent')
+  const backdrop = $('#modalBackdrop')
+  if(!content || !backdrop) return
+  content.innerHTML = html
+  backdrop.classList.add('show')
 }
-function closeModal(){ $('#modalBackdrop').classList.remove('show') }
-$('#modalClose').onclick=closeModal
-$('#modalBackdrop').onclick=e=>{ if(e.target.id==='modalBackdrop') closeModal() }
 
-function openBuy(id){
-  const p=products.find(x=>x.id===id)
-  openModal(`
-    <h3>确认订单</h3>
-    <div class=pay-box>
-      <strong>${esc(p.name)}</strong>
-      <div class=small>${esc(p.desc)}</div>
-      <p>金额：<b>$${p.price.toFixed(2)}</b></p>
-    </div>
-    <div class=form-row><label>联系账号</label><input id=contactValue placeholder=填写 Telegram、邮箱或其他联系方式></div>
-    <div class=form-row><label>需求说明</label><textarea id=noteValue rows=4 placeholder=填写合法且真实的服务需求></textarea></div>
-    <div class=modal-actions>
-      <button class=secondary-btn onclick=closeModal()>取消</button>
-      <button class=primary-btn id=confirmOrder>创建订单</button>
-    </div>`)
-  $('#confirmOrder').onclick=()=>{
-    const contact=$('#contactValue').value.trim()
-    if(!contact){alert('请填写联系方式');return}
-    const order={
-      no:'BC'+Date.now(),
-      product:p.name,
-      amount:p.price,
-      contact,
-      note:$('#noteValue').value.trim(),
-      status:'待支付',
-      created:new Date().toLocaleString()
-    }
-    state.orders.unshift(order)
-    localStorage.setItem('bc_orders',JSON.stringify(state.orders))
-    openPayment(order)
+function closeModal(){
+  if(activePaymentTimer){
+    clearInterval(activePaymentTimer)
+    activePaymentTimer = null
   }
+  const backdrop = $('#modalBackdrop')
+  if(backdrop) backdrop.classList.remove('show')
 }
-
-function openPayment(order){
-  const address='TBrXpCm2bmo4SXrTgPVSWNAmE3KxmQTr3n'
-  let remaining=15*60
-  openModal(`
-    <h3>USDT TRC20 支付</h3>
-    <div class=payment-page>
-      <div class=payment-summary>
-        <div><span class=small>订单号</span><strong>${esc(order.no)}</strong></div>
-        <div><span class=small>应付金额</span><strong>${order.amount.toFixed(2)} USDT</strong></div>
-      </div>
-
-      <div class=countdown-wrap>
-        剩余时间：<strong id=countdownText>15分00秒</strong>
-      </div>
-
-      <div class=chain-tip>请仔细核对区块链与币种，避免支付失败</div>
-      <div class=chain-info>区块链：波场 TRON　币种：USDT</div>
-
-      <div class=qr-wrap>
-        <img src=trc20-qr.png alt="USDT TRC20 收款二维码">
-      </div>
-
-      <div class=address-box>
-        <span id=walletAddress>${esc(address)}</span>
-        <button class=secondary-btn id=copyAddress>复制</button>
-      </div>
-
-      <div class=modal-actions>
-        <button class=secondary-btn id=cancelPayment>取消</button>
-        <button class=primary-btn id=paidBtn>我已付款</button>
-      </div>
-
-      <p class=small>该版本采用人工核验。付款完成后点击我已付款，后台核对到账后再更新余额或订单状态。</p>
-    </div>`)
-
-  const timer=setInterval(()=>{
-    remaining--
-    const m=Math.floor(remaining/60)
-    const s=remaining%60
-    const el=$('#countdownText')
-    if(el) el.textContent=`${m}分${String(s).padStart(2,'0')}秒`
-    if(remaining<=0){
-      clearInterval(timer)
-      if(el) el.textContent='订单已过期'
-    }
-  },1000)
-
-  $('#copyAddress').onclick=async()=>{
-    await navigator.clipboard.writeText(address)
-    alert('地址已复制')
-  }
-  $('#cancelPayment').onclick=()=>{
-    clearInterval(timer)
-    closeModal()
-  }
-  $('#paidBtn').onclick=()=>{
-    clearInterval(timer)
-    const idx=state.orders.findIndex(x=>x.no===order.no)
-    if(idx>=0) state.orders[idx].status='待人工核验'
-    localStorage.setItem('bc_orders',JSON.stringify(state.orders))
-    openOrders()
-  }
-}
-
-function openOrders(){
-  const rows=state.orders.length?state.orders.map(o=>`
-    <div class=order-row>
-      <strong>${esc(o.product)}</strong>
-      <div class=small>${esc(o.no)} · ${esc(o.created)}</div>
-      <div>金额：${o.amount.toFixed(2)} USDT　状态：${esc(o.status)}</div>
-    </div>`).join(''):'暂无订单'
-  openModal(`<h3>订单记录</h3>${rows}`)
-}
-
-function openRecharge(){
-  openModal(`
-    <h3>账户充值</h3>
-    <div class=pay-box>
-      <p>演示版采用 USDT TRC20 人工核验。</p>
-      <p class=small>正式上线前，请在 app.js 中配置你的收款地址，并增加后台审核功能。</p>
-    </div>
-    <div class=form-row><label>充值金额</label><input id=rechargeAmount type=number min=1 placeholder=例如 20></div>
-    <div class=modal-actions><button class=primary-btn id=createRecharge>生成充值单</button></div>`)
-  $('#createRecharge').onclick=()=>{
-    const amount=Number($('#rechargeAmount').value)
-    if(!amount||amount<=0){alert('请输入正确金额');return}
-    const order={no:'RC'+Date.now(),product:'账户充值',amount,contact:'当前用户',note:'',status:'待支付',created:new Date().toLocaleString()}
-    state.orders.unshift(order)
-    localStorage.setItem('bc_orders',JSON.stringify(state.orders))
-    openPayment(order)
-  }
-}
-
-function openContact(){
-  openModal(`
-    <h3>联系客服</h3>
-    <div class=pay-box>
-      <p>Telegram：@your_support</p>
-      <p>邮箱：support@example.com</p>
-    </div>
-    <p class=small>请在 app.js 中替换成你的真实客服联系方式。</p>`)
-}
-
-$('#rechargeBtn').onclick=openRecharge
-$('#contactBtn').onclick=openContact
-$('#heroContactBtn').onclick=openContact
-$('#ordersBtn').onclick=openOrders
-$('#ledgerBtn').onclick=()=>openModal('<h3>余额明细</h3><div class=pay-box>演示版暂未接入真实余额系统</div>')
-$('#tgBtn').onclick=openContact
-$('#siteInfoBtn').onclick=()=>openModal('<h3>站点资讯</h3><div class=pay-box>北辰出海数字服务商城演示版</div>')
-$('#userBtn').onclick=()=>openModal('<h3>账户信息</h3><div class=pay-box>用户名：beichen0001<br>账户类型：演示用户</div>')
-$('#themeBtn').onclick=()=>document.body.classList.toggle('dark')
-$('#menuBtn').onclick=()=>$('.sidebar').classList.toggle('open')
-$('#closeNotice').onclick=()=>$('.notice').remove()
-$('#searchInput').addEventListener('keydown',e=>{
-  if(e.key==='Enter'){state.query=e.target.value.trim();renderProducts()}
-})
-
-renderAll()
-
-
-// Supabase 登录功能。即使外部 SDK 加载失败，也不会影响原网站功能。
-let supabaseClient = null
 
 function setUserDisplay(user){
-  const userButton = document.querySelector('#userBtn')
+  const userButton = $('#userBtn')
   if(!userButton) return
+
   const nameNode = userButton.querySelectorAll('span')[1]
   const avatarNode = userButton.querySelector('.avatar')
 
@@ -336,23 +278,134 @@ function setUserDisplay(user){
   }
 }
 
-async function refreshAuthUser(){
-  if(!supabaseClient){
-    setUserDisplay(null)
+async function getCurrentUser(){
+  if(!supabaseClient) return null
+  try{
+    const {data, error} = await supabaseClient.auth.getUser()
+    if(error) throw error
+    return data.user || null
+  }catch(error){
+    console.warn('读取登录状态失败：', error.message)
+    return null
+  }
+}
+
+async function requireLogin(message = '请先登录或注册，再继续操作。'){
+  const user = await getCurrentUser()
+  if(user){
+    state.user = user
+    return user
+  }
+
+  openAuthModal(message)
+  return null
+}
+
+async function loadBalance(){
+  if(!state.user || !supabaseClient){
+    state.balance = 0
+    renderBalance()
+    return
+  }
+
+  if(!state.remoteBalanceAvailable){
+    state.balance = Number(localStorage.getItem(`bc_balance_${state.user.id}`) || 0)
+    renderBalance()
     return
   }
 
   try{
-    const {data, error} = await supabaseClient.auth.getUser()
+    const {data, error} = await supabaseClient
+      .from('profiles')
+      .select('balance')
+      .eq('id', state.user.id)
+      .maybeSingle()
+
     if(error) throw error
-    setUserDisplay(data.user)
+    state.balance = Number(data?.balance || 0)
   }catch(error){
-    console.warn('读取登录状态失败：', error.message)
-    setUserDisplay(null)
+    state.remoteBalanceAvailable = false
+    state.balance = Number(localStorage.getItem(`bc_balance_${state.user.id}`) || 0)
+    console.warn('profiles 表暂不可用，余额使用本地备用数据：', error.message)
+  }
+
+  renderBalance()
+}
+
+function normalizeRemoteOrder(row){
+  return {
+    id: row.id || null,
+    no: row.order_number || row.recharge_number || row.no || '',
+    product: row.product_name || row.product || '账户充值',
+    amount: Number(row.amount || 0),
+    contact: row.contact || '',
+    note: row.note || '',
+    status: row.status || 'pending',
+    created: row.created_at ? new Date(row.created_at).toLocaleString() : (row.created || ''),
+    type: row.recharge_number ? 'recharge' : (row.type || 'product')
   }
 }
 
-function openAuthModal(){
+async function loadOrders(){
+  if(!state.user){
+    state.orders = []
+    return
+  }
+
+  const localOrders = loadLocalOrders()
+
+  if(!supabaseClient || !state.remoteOrdersAvailable){
+    state.orders = localOrders
+    return
+  }
+
+  try{
+    const [ordersResult, rechargeResult] = await Promise.all([
+      supabaseClient
+        .from('orders')
+        .select('*')
+        .eq('user_id', state.user.id)
+        .order('created_at', {ascending:false}),
+      supabaseClient
+        .from('recharge_requests')
+        .select('*')
+        .eq('user_id', state.user.id)
+        .order('created_at', {ascending:false})
+    ])
+
+    const remoteOrders = []
+    if(!ordersResult.error && Array.isArray(ordersResult.data)){
+      remoteOrders.push(...ordersResult.data.map(normalizeRemoteOrder))
+    }
+    if(!rechargeResult.error && Array.isArray(rechargeResult.data)){
+      remoteOrders.push(...rechargeResult.data.map(normalizeRemoteOrder))
+    }
+
+    const hardError = ordersResult.error && rechargeResult.error
+    if(hardError) throw ordersResult.error
+
+    const merged = [...remoteOrders]
+    localOrders.forEach(localOrder => {
+      if(!merged.some(remoteOrder => remoteOrder.no === localOrder.no)){
+        merged.push(localOrder)
+      }
+    })
+
+    merged.sort((a,b) => String(b.no).localeCompare(String(a.no)))
+    state.orders = merged
+  }catch(error){
+    state.remoteOrdersAvailable = false
+    state.orders = localOrders
+    console.warn('远程订单表暂不可用，订单使用本地备用数据：', error.message)
+  }
+}
+
+async function refreshAccountData(){
+  await Promise.all([loadBalance(), loadOrders()])
+  renderAll()
+}
+
+function openAuthModal(initialMessage = ''){
   openModal(`
     <h3>邮箱登录 / 注册</h3>
     <div class=form-row>
@@ -367,27 +420,35 @@ function openAuthModal(){
       <button class=secondary-btn id=registerAccount>注册</button>
       <button class=primary-btn id=loginAccount>登录</button>
     </div>
-    <p class=small id=authMessage></p>
+    <p class=small id=authMessage>${esc(initialMessage)}</p>
   `)
 
-  const message = document.querySelector('#authMessage')
+  const message = $('#authMessage')
+  const registerButton = $('#registerAccount')
+  const loginButton = $('#loginAccount')
 
-  document.querySelector('#registerAccount').onclick = async () => {
+  registerButton.onclick = async () => {
     if(!supabaseClient){
-      message.textContent = '登录服务暂时没有加载，请联网后按 Ctrl + F5 刷新。'
+      message.textContent = '登录服务没有加载，请刷新页面后重试。'
       return
     }
 
-    const email = document.querySelector('#authEmail').value.trim()
-    const password = document.querySelector('#authPassword').value
+    const email = $('#authEmail').value.trim()
+    const password = $('#authPassword').value
 
     if(!email || password.length < 6){
       message.textContent = '请输入正确邮箱，密码至少6位。'
       return
     }
 
+    registerButton.disabled = true
+    loginButton.disabled = true
     message.textContent = '正在注册...'
+
     const {data, error} = await supabaseClient.auth.signUp({email, password})
+
+    registerButton.disabled = false
+    loginButton.disabled = false
 
     if(error){
       message.textContent = error.message
@@ -396,29 +457,34 @@ function openAuthModal(){
 
     if(data.session){
       message.textContent = '注册并登录成功。'
-      await refreshAuthUser()
-      setTimeout(closeModal, 500)
+      setTimeout(closeModal, 400)
     }else{
       message.textContent = '注册成功，请检查邮箱确认后再登录。'
     }
   }
 
-  document.querySelector('#loginAccount').onclick = async () => {
+  loginButton.onclick = async () => {
     if(!supabaseClient){
-      message.textContent = '登录服务暂时没有加载，请联网后按 Ctrl + F5 刷新。'
+      message.textContent = '登录服务没有加载，请刷新页面后重试。'
       return
     }
 
-    const email = document.querySelector('#authEmail').value.trim()
-    const password = document.querySelector('#authPassword').value
+    const email = $('#authEmail').value.trim()
+    const password = $('#authPassword').value
 
     if(!email || !password){
       message.textContent = '请输入邮箱和密码。'
       return
     }
 
+    registerButton.disabled = true
+    loginButton.disabled = true
     message.textContent = '正在登录...'
+
     const {error} = await supabaseClient.auth.signInWithPassword({email, password})
+
+    registerButton.disabled = false
+    loginButton.disabled = false
 
     if(error){
       message.textContent = error.message
@@ -426,51 +492,473 @@ function openAuthModal(){
     }
 
     message.textContent = '登录成功。'
-    await refreshAuthUser()
-    setTimeout(closeModal, 500)
+    setTimeout(closeModal, 400)
   }
 }
 
 async function logoutAccount(){
-  if(!supabaseClient){
-    alert('当前没有连接登录服务')
-    return
-  }
+  if(!supabaseClient) return
 
   const {error} = await supabaseClient.auth.signOut()
   if(error){
-    alert(error.message)
+    alert('退出失败：' + error.message)
     return
   }
 
+  state.user = null
+  state.balance = 0
+  state.orders = []
   setUserDisplay(null)
-  alert('已退出登录')
+  renderAll()
+  closeModal()
 }
 
-try{
-  if(window.supabase && window.SUPABASE_URL && window.SUPABASE_KEY){
+async function openAccount(){
+  const user = await getCurrentUser()
+  if(!user){
+    openAuthModal()
+    return
+  }
+
+  openModal(`
+    <h3>账户信息</h3>
+    <div class=pay-box>
+      <p>邮箱：${esc(user.email || '')}</p>
+      <p>余额：${formatMoney(state.balance)} USDT</p>
+    </div>
+    <div class=modal-actions>
+      <button class=secondary-btn id=logoutFromModal>退出登录</button>
+    </div>
+  `)
+
+  $('#logoutFromModal').onclick = logoutAccount
+}
+
+async function createRemoteProductOrder(order, user){
+  if(!supabaseClient || !state.remoteOrdersAvailable) return null
+
+  try{
+    const {data, error} = await supabaseClient
+      .from('orders')
+      .insert({
+        order_number: order.no,
+        user_id: user.id,
+        product_id: order.productId,
+        product_name: order.product,
+        amount: order.amount,
+        contact: order.contact,
+        note: order.note,
+        status: 'pending_payment'
+      })
+      .select('*')
+      .single()
+
+    if(error) throw error
+    return normalizeRemoteOrder(data)
+  }catch(error){
+    state.remoteOrdersAvailable = false
+    console.warn('orders 表暂不可用，商品订单保存到本地：', error.message)
+    return null
+  }
+}
+
+async function openBuy(id){
+  const user = await requireLogin('请先登录或注册，再购买商品。')
+  if(!user) return
+
+  const product = products.find(item => item.id === id)
+  if(!product) return
+
+  openModal(`
+    <h3>确认订单</h3>
+    <div class=pay-box>
+      <strong>${esc(product.name)}</strong>
+      <div class=small>${esc(product.desc)}</div>
+      <p>金额：<b>$${formatMoney(product.price)}</b></p>
+    </div>
+    <div class=form-row>
+      <label>联系账号</label>
+      <input id=contactValue placeholder=填写 Telegram、邮箱或其他联系方式>
+    </div>
+    <div class=form-row>
+      <label>需求说明</label>
+      <textarea id=noteValue rows=4 placeholder=填写合法且真实的服务需求></textarea>
+    </div>
+    <div class=modal-actions>
+      <button class=secondary-btn id=cancelOrder>取消</button>
+      <button class=primary-btn id=confirmOrder>创建订单</button>
+    </div>
+  `)
+
+  $('#cancelOrder').onclick = closeModal
+  $('#confirmOrder').onclick = async () => {
+    const contact = $('#contactValue').value.trim()
+    const note = $('#noteValue').value.trim()
+    if(!contact){
+      alert('请填写联系方式')
+      return
+    }
+
+    const button = $('#confirmOrder')
+    button.disabled = true
+    button.textContent = '正在创建...'
+
+    const order = {
+      no: 'BC' + Date.now(),
+      productId: product.id,
+      product: product.name,
+      amount: Number(product.price),
+      contact,
+      note,
+      status: '待支付',
+      created: new Date().toLocaleString(),
+      type: 'product'
+    }
+
+    const remoteOrder = await createRemoteProductOrder(order, user)
+    const finalOrder = remoteOrder || order
+
+    if(!remoteOrder){
+      state.orders.unshift(order)
+      saveLocalOrders()
+    }else{
+      state.orders.unshift(remoteOrder)
+    }
+
+    openPayment(finalOrder)
+  }
+}
+
+async function updatePaymentStatus(order){
+  if(!supabaseClient || !state.user) return
+
+  try{
+    if(order.type === 'recharge'){
+      await supabaseClient
+        .from('recharge_requests')
+        .update({status:'pending_verification'})
+        .eq('recharge_number', order.no)
+        .eq('user_id', state.user.id)
+    }else if(order.id && state.remoteOrdersAvailable){
+      await supabaseClient
+        .from('orders')
+        .update({status:'pending_verification'})
+        .eq('id', order.id)
+        .eq('user_id', state.user.id)
+    }
+
+    if(APP_CONFIG.listenerFunction){
+      const {error} = await supabaseClient.functions.invoke(APP_CONFIG.listenerFunction, {
+        body: {source:'website', order_number:order.no}
+      })
+      if(error) console.warn('链上监听函数调用失败：', error.message)
+    }
+  }catch(error){
+    console.warn('更新付款状态失败：', error.message)
+  }
+}
+
+function openPayment(order){
+  if(activePaymentTimer) clearInterval(activePaymentTimer)
+
+  let remaining = 15 * 60
+  openModal(`
+    <h3>USDT TRC20 支付</h3>
+    <div class=payment-page>
+      <div class=payment-summary>
+        <div><span class=small>订单号</span><strong>${esc(order.no)}</strong></div>
+        <div><span class=small>应付金额</span><strong>${formatMoney(order.amount)} USDT</strong></div>
+      </div>
+
+      <div class=countdown-wrap>
+        剩余时间：<strong id=countdownText>15分00秒</strong>
+      </div>
+
+      <div class=chain-tip>请仔细核对区块链与币种</div>
+      <div class=chain-info>区块链：波场 TRON　币种：USDT</div>
+
+      <div class=qr-wrap>
+        <img src="${esc(APP_CONFIG.qrImage)}" alt="USDT TRC20 收款二维码">
+      </div>
+
+      <div class=address-box>
+        <span id=walletAddress>${esc(APP_CONFIG.walletAddress)}</span>
+        <button class=secondary-btn id=copyAddress>复制</button>
+      </div>
+
+      <div class=modal-actions>
+        <button class=secondary-btn id=cancelPayment>取消</button>
+        <button class=primary-btn id=paidBtn>我已付款</button>
+      </div>
+
+      <p class=small>付款后点击我已付款，系统会把订单标记为待核验，并尝试调用链上监听功能。</p>
+    </div>
+  `)
+
+  activePaymentTimer = setInterval(() => {
+    remaining -= 1
+    const minutes = Math.floor(remaining / 60)
+    const seconds = remaining % 60
+    const element = $('#countdownText')
+
+    if(element) element.textContent = `${minutes}分${String(seconds).padStart(2,'0')}秒`
+
+    if(remaining <= 0){
+      clearInterval(activePaymentTimer)
+      activePaymentTimer = null
+      if(element) element.textContent = '订单已过期'
+    }
+  }, 1000)
+
+  $('#copyAddress').onclick = async () => {
+    try{
+      await navigator.clipboard.writeText(APP_CONFIG.walletAddress)
+      alert('地址已复制')
+    }catch(error){
+      alert('复制失败，请手动复制地址')
+    }
+  }
+
+  $('#cancelPayment').onclick = closeModal
+
+  $('#paidBtn').onclick = async () => {
+    const button = $('#paidBtn')
+    button.disabled = true
+    button.textContent = '正在提交...'
+
+    await updatePaymentStatus(order)
+
+    const index = state.orders.findIndex(item => item.no === order.no)
+    if(index >= 0) state.orders[index].status = '待核验'
+    saveLocalOrders()
+
+    await loadOrders()
+    openOrders()
+  }
+}
+
+async function openOrders(){
+  const user = await requireLogin('请先登录或注册，再查看订单。')
+  if(!user) return
+
+  await loadOrders()
+
+  const rows = state.orders.length ? state.orders.map(order => `
+    <div class=order-row>
+      <strong>${esc(order.product)}</strong>
+      <div class=small>${esc(order.no)} · ${esc(order.created)}</div>
+      <div>金额：${formatMoney(order.amount)} USDT　状态：${esc(order.status)}</div>
+    </div>
+  `).join('') : '暂无订单'
+
+  openModal(`<h3>订单记录</h3>${rows}`)
+}
+
+async function openRecharge(){
+  const user = await requireLogin('请先登录或注册，再充值。')
+  if(!user) return
+
+  openModal(`
+    <h3>账户充值</h3>
+    <div class=pay-box>
+      <p>充值方式：USDT TRC20</p>
+      <p class=small>创建充值单后，请按照页面显示的地址和金额付款。</p>
+    </div>
+    <div class=form-row>
+      <label>充值金额</label>
+      <input id=rechargeAmount type=number min=1 step=0.01 placeholder=例如 20>
+    </div>
+    <div class=modal-actions>
+      <button class=primary-btn id=createRecharge>生成充值单</button>
+    </div>
+  `)
+
+  $('#createRecharge').onclick = async () => {
+    const amount = Number($('#rechargeAmount').value)
+    if(!Number.isFinite(amount) || amount <= 0){
+      alert('请输入正确金额')
+      return
+    }
+
+    const button = $('#createRecharge')
+    button.disabled = true
+    button.textContent = '正在创建...'
+
+    const rechargeNumber = 'RC' + Date.now()
+    const roundedAmount = Number(amount.toFixed(2))
+
+    try{
+      const {data, error} = await supabaseClient
+        .from('recharge_requests')
+        .insert({
+          recharge_number: rechargeNumber,
+          user_id: user.id,
+          amount: roundedAmount,
+          status: 'pending'
+        })
+        .select('*')
+        .single()
+
+      if(error) throw error
+
+      const order = normalizeRemoteOrder(data)
+      order.type = 'recharge'
+      state.orders.unshift(order)
+      openPayment(order)
+    }catch(error){
+      button.disabled = false
+      button.textContent = '生成充值单'
+      alert('创建充值单失败：' + error.message)
+    }
+  }
+}
+
+async function openLedger(){
+  const user = await requireLogin('请先登录或注册，再查看余额明细。')
+  if(!user) return
+
+  if(!supabaseClient || !state.remoteLedgerAvailable){
+    openModal('<h3>余额明细</h3><div class=pay-box>余额明细表暂未配置。</div>')
+    return
+  }
+
+  try{
+    const {data, error} = await supabaseClient
+      .from('ledger_entries')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', {ascending:false})
+
+    if(error) throw error
+
+    const rows = data?.length ? data.map(entry => `
+      <div class=order-row>
+        <strong>${esc(entry.description || entry.type || '余额变动')}</strong>
+        <div class=small>${entry.created_at ? new Date(entry.created_at).toLocaleString() : ''}</div>
+        <div>${Number(entry.amount) >= 0 ? '+' : ''}${formatMoney(entry.amount)} USDT</div>
+      </div>
+    `).join('') : '暂无余额明细'
+
+    openModal(`<h3>余额明细</h3>${rows}`)
+  }catch(error){
+    state.remoteLedgerAvailable = false
+    openModal('<h3>余额明细</h3><div class=pay-box>余额明细表暂未配置。</div>')
+  }
+}
+
+function openContact(){
+  openModal(`
+    <h3>联系客服</h3>
+    <div class=pay-box>
+      <p>Telegram：${esc(APP_CONFIG.supportTelegram)}</p>
+      <p>邮箱：${esc(APP_CONFIG.supportEmail)}</p>
+    </div>
+    <p class=small>客服信息统一放在 app.js 顶部的 APP_CONFIG 中。</p>
+  `)
+}
+
+function openSiteInfo(){
+  openModal(`
+    <h3>站点资讯</h3>
+    <div class=pay-box>
+      北辰出海提供合法的数字服务、资料优化、翻译与技术咨询。
+    </div>
+  `)
+}
+
+function bindPageEvents(){
+  const modalClose = $('#modalClose')
+  const modalBackdrop = $('#modalBackdrop')
+  const rechargeButton = $('#rechargeBtn')
+  const contactButton = $('#contactBtn')
+  const heroContactButton = $('#heroContactBtn')
+  const ordersButton = $('#ordersBtn')
+  const ledgerButton = $('#ledgerBtn')
+  const tgButton = $('#tgBtn')
+  const siteInfoButton = $('#siteInfoBtn')
+  const userButton = $('#userBtn')
+  const themeButton = $('#themeBtn')
+  const menuButton = $('#menuBtn')
+  const closeNotice = $('#closeNotice')
+  const searchInput = $('#searchInput')
+  const logoutButton = $('.logout')
+
+  if(modalClose) modalClose.onclick = closeModal
+  if(modalBackdrop) modalBackdrop.onclick = event => {
+    if(event.target.id === 'modalBackdrop') closeModal()
+  }
+  if(rechargeButton) rechargeButton.onclick = openRecharge
+  if(contactButton) contactButton.onclick = openContact
+  if(heroContactButton) heroContactButton.onclick = openContact
+  if(ordersButton) ordersButton.onclick = openOrders
+  if(ledgerButton) ledgerButton.onclick = openLedger
+  if(tgButton) tgButton.onclick = openContact
+  if(siteInfoButton) siteInfoButton.onclick = openSiteInfo
+  if(userButton) userButton.onclick = openAccount
+  if(themeButton) themeButton.onclick = () => document.body.classList.toggle('dark')
+  if(menuButton) menuButton.onclick = () => {
+    const sidebar = $('.sidebar')
+    if(sidebar) sidebar.classList.toggle('open')
+  }
+  if(closeNotice) closeNotice.onclick = () => {
+    const notice = $('.notice')
+    if(notice) notice.remove()
+  }
+  if(searchInput){
+    searchInput.addEventListener('keydown', event => {
+      if(event.key === 'Enter'){
+        state.query = event.target.value.trim()
+        renderProducts()
+      }
+    })
+  }
+  if(logoutButton) logoutButton.onclick = logoutAccount
+}
+
+async function initializeSupabase(){
+  if(!window.supabase || !window.SUPABASE_URL || !window.SUPABASE_KEY){
+    console.warn('Supabase SDK 或配置未加载')
+    setUserDisplay(null)
+    return
+  }
+
+  try{
     supabaseClient = window.supabase.createClient(
       window.SUPABASE_URL,
       window.SUPABASE_KEY
     )
 
-    // 覆盖演示版账户按钮，但不影响其他原有按钮。
-    const accountButton = document.querySelector('#userBtn')
-    const logoutButton = document.querySelector('.logout')
+    supabaseClient.auth.onAuthStateChange(async (_event, session) => {
+      state.user = session?.user || null
+      setUserDisplay(state.user)
 
-    if(accountButton) accountButton.onclick = openAuthModal
-    if(logoutButton) logoutButton.onclick = logoutAccount
-
-    supabaseClient.auth.onAuthStateChange(() => {
-      setTimeout(refreshAuthUser, 0)
+      if(state.user){
+        await refreshAccountData()
+      }else{
+        state.balance = 0
+        state.orders = []
+        renderAll()
+      }
     })
 
-    refreshAuthUser()
-  }else{
-    console.warn('Supabase SDK 未加载，原网站功能仍可正常使用。')
+    state.user = await getCurrentUser()
+    setUserDisplay(state.user)
+
+    if(state.user){
+      await refreshAccountData()
+    }
+  }catch(error){
+    console.warn('Supabase 初始化失败：', error.message)
+    supabaseClient = null
+    state.user = null
     setUserDisplay(null)
   }
-}catch(error){
-  console.warn('Supabase 初始化失败，原网站功能仍可正常使用：', error.message)
-  setUserDisplay(null)
 }
+
+async function startApp(){
+  bindPageEvents()
+  renderAll()
+  await initializeSupabase()
+}
+
+startApp()
