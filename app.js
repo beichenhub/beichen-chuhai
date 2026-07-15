@@ -1,4 +1,4 @@
-const categories = [
+const fallbackCategories = [
   { name: 'theleague', color: '#16191e', icon: 'L' },
   { name: 'Match', color: '#4659d6', icon: 'M' },
   { name: '2RedBeans', color: '#ee4a95', icon: '2R' },
@@ -10,7 +10,7 @@ const categories = [
   { name: 'Ourtime', color: '#e36c8f', icon: 'O' }
 ]
 
-const products = [
+const fallbackProducts = [
   ['theleague','The League 35至55岁资料优化','基于本人真实经历优化简介、兴趣、关系目标与照片顺序',12,27],
   ['theleague','The League 通用资料优化','适合年龄不限的基础资料检查与文案调整',10,24],
   ['theleague','The League 男性 35至55岁资料优化','优化职业表达、生活方式、关系目标与第一条消息',12,16],
@@ -72,8 +72,10 @@ const products = [
   ['Ourtime','OurTime 加拿大男性 45至70岁资料优化','结合真实经历优化简介、兴趣与自然开场内容',19.3,70],
   ['Ourtime','OurTime 加拿大女性 40至70岁资料优化','优化生活方式、照片顺序与长期关系表达',29.7,0],
   ['Ourtime','OurTime 男性 66至72岁资料优化','优化个人简介、兴趣、家庭观念与消息开场',19.3,169]
-].map((p,i)=>({id:i+1,category:p[0],name:p[1],desc:p[2],price:p[3],stock:p[4]}))
+].map((p,i)=>({id:i+1,category:p[0],name:p[1],desc:p[2],price:p[3],stock:p[4],isCustom:p[0].includes('定制服务')}))
 
+let categories = [...fallbackCategories]
+let products = [...fallbackProducts]
 
 const APP_CONFIG = {
   walletAddress: 'TBrXpCm2bmo4SXrTgPVSWNAmE3KxmQTr3n',
@@ -90,6 +92,8 @@ const state = {
   orders: [],
   ledger: [],
   user: null,
+  isAdmin: false,
+  catalogLoaded: false,
   remoteOrdersAvailable: true,
   remoteBalanceAvailable: true,
   remoteLedgerAvailable: true
@@ -136,6 +140,78 @@ function saveLocalOrders(){
     localStorage.setItem(currentUserStorageKey(), JSON.stringify(state.orders))
   }catch(error){
     console.warn('保存本地订单失败：', error.message)
+  }
+}
+
+
+async function loadCatalog(){
+  if(!supabaseClient) return
+
+  try{
+    const [categoryResult, productResult] = await Promise.all([
+      supabaseClient
+        .from('categories')
+        .select('*')
+        .eq('is_active', true)
+        .order('sort_order', {ascending:true})
+        .order('id', {ascending:true}),
+      supabaseClient
+        .from('products')
+        .select('*, category:categories(name, icon, color)')
+        .eq('is_active', true)
+        .order('sort_order', {ascending:true})
+        .order('id', {ascending:true})
+    ])
+
+    if(categoryResult.error) throw categoryResult.error
+    if(productResult.error) throw productResult.error
+
+    if(Array.isArray(categoryResult.data) && categoryResult.data.length){
+      categories = categoryResult.data.map(item => ({
+        id: Number(item.id),
+        name: item.name,
+        icon: item.icon || '北',
+        color: item.color || '#2563eb'
+      }))
+    }
+
+    if(Array.isArray(productResult.data) && productResult.data.length){
+      products = productResult.data.map(item => ({
+        id: Number(item.id),
+        categoryId: Number(item.category_id),
+        category: item.category?.name || '其他',
+        name: item.name,
+        desc: item.description || '',
+        price: Number(item.price || 0),
+        stock: Number(item.stock || 0),
+        imageUrl: item.image_url || '',
+        isCustom: Boolean(item.is_custom)
+      }))
+    }
+
+    state.catalogLoaded = true
+  }catch(error){
+    console.warn('商品数据库暂不可用，继续显示内置商品：', error.message)
+  }
+
+  renderAll()
+}
+
+async function loadAdminStatus(){
+  state.isAdmin = false
+  if(!state.user || !supabaseClient) return
+
+  try{
+    const {data, error} = await supabaseClient
+      .from('profiles')
+      .select('is_admin')
+      .eq('id', state.user.id)
+      .maybeSingle()
+
+    if(error) throw error
+    state.isAdmin = Boolean(data?.is_admin)
+  }catch(error){
+    console.warn('管理员状态读取失败：', error.message)
   }
 }
 
@@ -206,7 +282,7 @@ function renderProducts(){
             <div class=product-price>$${formatMoney(product.price)}</div>
             <div class=stock>库存 ${product.stock}</div>
             <button class=buy-btn data-buy=${product.id}>
-              ${product.category.includes('定制服务') ? '联系客服' : (product.stock === 0 ? '查看库存' : '▢ 购买')}
+              ${product.isCustom ? '联系客服' : (product.stock === 0 ? '查看库存' : '▢ 购买')}
             </button>
           </div>`).join('')}
       </div>
@@ -218,7 +294,7 @@ function renderProducts(){
       const product = products.find(item => item.id === Number(button.dataset.buy))
       if(!product) return
 
-      if(product.category.includes('定制服务')){
+      if(product.isCustom){
         openContact()
         return
       }
@@ -401,7 +477,7 @@ async function loadOrders(){
 }
 
 async function refreshAccountData(){
-  await Promise.all([loadBalance(), loadOrders()])
+  await Promise.all([loadBalance(), loadOrders(), loadAdminStatus()])
   renderAll()
 }
 
@@ -506,6 +582,7 @@ async function logoutAccount(){
   }
 
   state.user = null
+  state.isAdmin = false
   state.balance = 0
   state.orders = []
   setUserDisplay(null)
@@ -525,12 +602,15 @@ async function openAccount(){
     <div class=pay-box>
       <p>邮箱：${esc(user.email || '')}</p>
       <p>余额：${formatMoney(state.balance)} USDT</p>
+      ${state.isAdmin ? '<p><strong>管理员权限已启用</strong></p>' : ''}
     </div>
     <div class=modal-actions>
+      ${state.isAdmin ? '<button class=primary-btn id=openAdmin>管理后台</button>' : ''}
       <button class=secondary-btn id=logoutFromModal>退出登录</button>
     </div>
   `)
 
+  if(state.isAdmin) $('#openAdmin').onclick = () => { location.href = 'admin.html' }
   $('#logoutFromModal').onclick = logoutAccount
 }
 
@@ -928,6 +1008,8 @@ async function initializeSupabase(){
       window.SUPABASE_KEY
     )
 
+    await loadCatalog()
+
     supabaseClient.auth.onAuthStateChange(async (_event, session) => {
       state.user = session?.user || null
       setUserDisplay(state.user)
@@ -935,6 +1017,7 @@ async function initializeSupabase(){
       if(state.user){
         await refreshAccountData()
       }else{
+        state.isAdmin = false
         state.balance = 0
         state.orders = []
         renderAll()
